@@ -7,9 +7,14 @@ data is stored locally; API requests and OAuth credentials go only to Withings.
 
 Requires Python 3.10+ on Linux or macOS.
 
+> **Withings plan requirement:** Withings says the free “Start for Free” API
+> plan requires a Withings+ membership for Withings accounts created after
+> October 12, 2026. Check the [Withings API plans](https://developer.withings.com/developer-guide/v3/withings-solutions/withings-api-plans/)
+> page before troubleshooting an authorization failure.
+
 ## Install from GitHub
 
-After the repository is published, install with [pipx](https://pipx.pypa.io/):
+Install with [pipx](https://pipx.pypa.io/):
 
 ```bash
 pipx install 'git+https://github.com/yaeloss/withings-agent-sync.git'
@@ -58,7 +63,7 @@ PyPI. The Python module is `withings_agent_sync`.
 5. Replace the placeholders above with your application's values, then authorize:
 
    ```bash
-    withings-agent-sync authorize
+   withings-agent-sync authorize
    withings-agent-sync sync
    ```
 
@@ -68,8 +73,10 @@ machine's loopback address. If you use `--port`, register the corresponding
 callback URL in the Withings application first.
 
 The default token file is `~/.local/state/withings-agent-sync/tokens.json` and
-is written with mode `0600`. Do not put the credentials, token, snapshot, or
-history files in a Git repository or a shared directory.
+is written with mode `0600`. Health output is kept separately in
+`~/.local/share/withings-agent-sync/`, so that directory can be shared with a
+local agent without also exposing OAuth tokens. Do not put credentials, tokens,
+or health files in a Git repository or an untrusted/shared directory.
 
 ### Headless or SSH authorization
 
@@ -100,15 +107,13 @@ response is an acknowledgement; the terminal confirms whether tokens were saved.
 > - Activity and sleep can return a non-zero API status when scopes or devices
 >   are unavailable. The raw lists contain an error entry, the sync continues,
 >   and summary counts exclude that error entry.
-> - Withings currently advertises that Withings+ becomes required for the
->   “Start for Free” API plan from October 12, 2026. Check the [API
->   plans](https://developer.withings.com/developer-guide/v3/withings-solutions/withings-api-plans/)
->   page if authorization is unavailable.
+> - For the current Withings+ requirement affecting newer accounts, see the
+>   plan notice near the top of this README.
 
 ## Output
 
 By default, `withings-agent-sync sync` writes these private files in
-`~/.local/state/withings-agent-sync/`:
+`~/.local/share/withings-agent-sync/`:
 
 - `withings_latest.json` — the complete current snapshot:
 
@@ -170,25 +175,50 @@ By default, `withings-agent-sync sync` writes these private files in
 - `withings_sync_history.jsonl` — one private summary record per completed sync:
 
   ```json
-  {"schema_version": 1, "status": "ok", "synced_at": "...", "summary": {"latest_measures": {}, "latest_activity": null, "latest_sleep": null, "measure_count": 0, "activity_count": 0, "sleep_count": 0}}
+  {"schema_version": 1, "status": "ok", "synced_at": "...", "summary": {"latest_measures": {}, "measure_count": 0, "activity_count": 0, "sleep_count": 0, "latest_activity_date": null, "latest_sleep_date": null}}
   ```
 
 The fetchers follow Withings pagination, so a multi-page API response is
 combined before sorting and summarizing.
 
 Records are newest-first. Measurement timestamps are UTC; daily activity and
-sleep dates are preserved as returned by Withings. Measurements request real
-observations (`category=1`), not weight goals. `measure_count` counts measurement
-groups, not individual fields. History stores summaries, not every raw record,
-and repeated lookback windows can produce repeated summary values.
+sleep dates are preserved as returned by Withings. Activity and sleep requests
+end one day after the current UTC date so the current local day is included in
+time zones ahead of UTC. Measurements request real observations (`category=1`),
+not weight goals. `measure_count` counts measurement groups, not individual
+fields. History stores counts, latest measurement values, and the dates of the
+latest activity and sleep records—not the raw records. Repeated lookback
+windows can produce repeated summary values.
 
-Partial sync exits `0`; automation that requires all endpoints should check
-`status` in the JSON rather than rely only on the exit code.
+A partial sync exits `3`; this means the snapshot was saved but activity or
+sleep was unavailable. Automation can treat `0` as complete, `3` as usable but
+incomplete, `2` as invalid configuration/usage, and `1` as an API, network,
+storage, or concurrency failure.
 
 Use `--out DIR` to select a different snapshot directory and `--history FILE`
 to select a different history file. Token, credential, snapshot, history, and
-lock paths must not alias one another. The data filenames are retained for
-compatibility; the application and default directories use the new name.
+lock paths must not alias one another, and `sync` refuses an output directory
+that contains the token or credentials file. The data filenames are retained
+for compatibility; the application and default directories use the new name.
+
+## Using with AI agents
+
+Schedule `withings-agent-sync sync --quiet` yourself (for example with cron),
+then give the agent read access to the data directory only:
+
+```text
+~/.local/share/withings-agent-sync/withings_latest.json
+```
+
+- Do not give agents access to `~/.local/state/withings-agent-sync/` (OAuth
+  tokens) or `~/.config/withings-agent-sync/` (client secret). An agent that can
+  run shell commands as your user can read those files regardless of their
+  permissions, so prefer scheduled syncs over letting the agent run `sync`.
+- Check `schema_version` (currently `1`) and `status` before using the data.
+  `partial` means activity or sleep is missing from this snapshot.
+- Use `summary` for the latest values; `measures`, `activity`, and `sleep` hold
+  the full lookback window.
+- Treat the contents as personal health data, not medical advice.
 
 ## Privacy and reliability
 
@@ -215,8 +245,22 @@ permissions are not encryption and do not manage extended ACLs or backup access.
 History grows until you manage its retention. This tool is not medical software
 and is not affiliated with Withings. See [SECURITY.md](SECURITY.md).
 
-Exit codes: `0` completed (including documented partial results), `2` invalid
-configuration or usage, `1` API/network/storage errors or an overlapping run.
+Exit codes: `0` completed, `3` completed with unavailable activity or sleep,
+`2` invalid configuration or usage, `1` API/network/storage errors or an
+overlapping run.
+
+## Disconnect and delete data
+
+1. Remove the scheduled job, then delete local files:
+
+   ```bash
+   rm -rf ~/.local/share/withings-agent-sync ~/.local/state/withings-agent-sync ~/.config/withings-agent-sync
+   pipx uninstall withings-agent-sync
+   ```
+
+   Adjust the paths if you set `WITHINGS_*` variables, `--out`, or `--history`.
+2. Revoke the app's access to your Withings account, or delete the application
+   in the [Withings Developer Dashboard](https://developer.withings.com/dashboard/).
 
 ## Scheduling
 
@@ -228,6 +272,7 @@ path to the installed executable and make the environment explicit:
 ```
 
 For a virtual environment, use `/home/you/venv/bin/withings-agent-sync`.
+Cron reports nonzero exits, including `3` for a partial sync.
 
 ## Environment variables
 
@@ -235,7 +280,7 @@ For a virtual environment, use `/home/you/venv/bin/withings-agent-sync`.
 | --- | --- | --- |
 | `WITHINGS_TOKEN_FILE` | OAuth token JSON file | `~/.local/state/withings-agent-sync/tokens.json` |
 | `WITHINGS_CREDS_FILE` | client credentials JSON file | `~/.config/withings-agent-sync/client.json` |
-| `WITHINGS_OUT_DIR` | snapshot output directory | `~/.local/state/withings-agent-sync` |
+| `WITHINGS_OUT_DIR` | snapshot output directory | `~/.local/share/withings-agent-sync` |
 | `WITHINGS_SYNC_DAYS` | number of days fetched by `sync` | `30` |
 | `WITHINGS_CLIENT_ID` | client ID override | unset |
 | `WITHINGS_CLIENT_SECRET` | client secret override | unset |

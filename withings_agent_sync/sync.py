@@ -20,10 +20,13 @@ from .storage import load_json, save_json_secure
 HOME = Path.home()
 DEFAULT_TOKEN_FILE = HOME / ".local/state/withings-agent-sync/tokens.json"
 DEFAULT_CREDS_FILE = HOME / ".config/withings-agent-sync/client.json"
-DEFAULT_OUT_DIR = HOME / ".local/state/withings-agent-sync"
+# Health data lives apart from tokens so the data folder can be shared with agents.
+DEFAULT_OUT_DIR = HOME / ".local/share/withings-agent-sync"
 API_BASE = "https://wbsapi.withings.net"
 MAX_PAGES = 1000
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+# Withings documents these response statuses as authentication failures.
+AUTH_FAILURE_STATUSES = frozenset({100, 101, 102, 200, 401})
 
 MEASURE_TYPES = {
     1: "weight_kg",
@@ -62,8 +65,6 @@ SLEEP_FIELDS = ",".join(
         "chest_movement_rate_wellness_max",
         "chest_movement_rate_wellness_min",
         "deepsleepduration",
-        "durationtosleep",
-        "durationtowakeup",
         "hr_average",
         "hr_max",
         "hr_min",
@@ -182,12 +183,21 @@ def post_form(path: str, data: dict[str, Any], token: str | None = None) -> dict
             raise APIError(f"Refused HTTP redirect from {path}; credentials are not forwarded.") from exc
         raise APIError(f"HTTP {exc.code} from {path}. Check credentials, permissions, and API availability.") from exc
     except (HTTPException, TimeoutError, URLError, OSError) as exc:
-        raise APIError(f"Network request to {path} failed or timed out. Check connectivity and retry.") from exc
+        raise APIError(
+            f"Network request to {path} failed or timed out ({_failure_kind(exc)}). "
+            "Check connectivity, DNS, and TLS certificates, then retry."
+        ) from exc
     except ValueError as exc:
         raise APIError(f"Invalid JSON response from {path}") from exc
     if not isinstance(payload, dict):
         raise APIError(f"Invalid response shape from {path}: expected a JSON object")
     return payload
+
+
+def _failure_kind(exc: BaseException) -> str:
+    # Class names identify DNS, TLS, or timeout failures without echoing untrusted reason text.
+    reason = exc.reason if isinstance(exc, URLError) else None
+    return type(reason if isinstance(reason, BaseException) else exc).__name__
 
 
 def _reject_json_constant(value: str) -> None:
@@ -210,11 +220,17 @@ def _response_body(data: Any, endpoint: str) -> dict[str, Any]:
     if isinstance(status, bool) or not isinstance(status, int):
         raise APIError(f"{endpoint} returned an invalid status")
     if status != 0:
-        raise APIError(f"{endpoint} failed with status {status}")
+        raise APIError(f"{endpoint} failed with status {status}{reauthorize_hint(status)}")
     body = data.get("body")
     if not isinstance(body, dict):
         raise APIError(f"{endpoint} returned a success response without an object body")
     return body
+
+
+def reauthorize_hint(status: int) -> str:
+    if status in AUTH_FAILURE_STATUSES:
+        return "; Withings rejected the authorization. Run withings-agent-sync authorize again."
+    return ""
 
 
 def _degraded_error(data: Any) -> list[dict[str, Any]] | None:
@@ -461,14 +477,13 @@ def fetch_measures(token: str, days: int) -> list[dict[str, Any]]:
 
 def fetch_activity(token: str, days: int) -> list[dict[str, Any]]:
     _require_days(days)
-    end = datetime.now(timezone.utc).date()
-    start = end - timedelta(days=days)
+    start, end = _daily_window(days)
     activities = _fetch_pages(
         "/v2/measure",
         {
             "action": "getactivity",
-            "startdateymd": start.isoformat(),
-            "enddateymd": end.isoformat(),
+            "startdateymd": start,
+            "enddateymd": end,
             "data_fields": ACTIVITY_FIELDS,
         },
         token,
@@ -482,14 +497,13 @@ def fetch_activity(token: str, days: int) -> list[dict[str, Any]]:
 
 def fetch_sleep(token: str, days: int) -> list[dict[str, Any]]:
     _require_days(days)
-    end = datetime.now(timezone.utc).date()
-    start = end - timedelta(days=days)
+    start, end = _daily_window(days)
     series = _fetch_pages(
         "/v2/sleep",
         {
             "action": "getsummary",
-            "startdateymd": start.isoformat(),
-            "enddateymd": end.isoformat(),
+            "startdateymd": start,
+            "enddateymd": end,
             "data_fields": SLEEP_FIELDS,
         },
         token,
@@ -499,6 +513,17 @@ def fetch_sleep(token: str, days: int) -> list[dict[str, Any]]:
     )
     _sort_daily_records(series, "getsummary")
     return series
+
+
+def _utc_today() -> date:
+    return datetime.now(timezone.utc).date()
+
+
+def _daily_window(days: int) -> tuple[str, str]:
+    # Activity and sleep dates are calendar dates, which can be ahead of UTC.
+    # Request one extra day so the user's current local day is not missed.
+    today = _utc_today()
+    return (today - timedelta(days=days)).isoformat(), (today + timedelta(days=1)).isoformat()
 
 
 def _sort_daily_records(records: list[dict[str, Any]], endpoint: str) -> None:

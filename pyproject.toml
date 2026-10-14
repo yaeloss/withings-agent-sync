@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "withings-agent-sync"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Private, zero-dependency Withings JSON sync for agents and local pipelines."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -31,6 +31,9 @@ Issues = "https://github.com/yaeloss/withings-agent-sync/issues"
 
 [tool.setuptools]
 packages = ["withings_agent_sync"]
+
+[tool.setuptools.dynamic]
+version = { attr = "withings_agent_sync.__version__" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

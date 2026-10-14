@@ -16,6 +16,7 @@ from .storage import append_jsonl_secure, check_history, exclusive_locks, valida
 
 SNAPSHOT_NAME = "withings_latest.json"
 HISTORY_NAME = "withings_sync_history.jsonl"
+EXIT_PARTIAL = 3
 
 
 def _positive_int(value: str) -> int:
@@ -58,7 +59,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sync_parser = subparsers.add_parser("sync", help="fetch and save recent Withings data")
     sync_parser.add_argument("--days", type=_days, help="number of days to fetch (WITHINGS_SYNC_DAYS or 30)")
-    sync_parser.add_argument("--out", type=Path, help="output directory (default: WITHINGS_OUT_DIR)")
+    sync_parser.add_argument(
+        "--out", type=Path, help="output directory (default: WITHINGS_OUT_DIR or ~/.local/share/withings-agent-sync)"
+    )
     sync_parser.add_argument("--history", type=Path, help="history JSONL path (default: <out>/withings_sync_history.jsonl)")
     sync_parser.add_argument("--quiet", action="store_true", help="do not print the successful sync summary")
     return parser
@@ -74,21 +77,45 @@ def _configured_days(value: int | None) -> int:
         raise ConfigError(f"WITHINGS_SYNC_DAYS {exc}") from exc
 
 
+def _reject_secrets_in_output(out_dir: Path, secrets: dict[str, Path]) -> None:
+    data_dir = out_dir.resolve()
+    for label, path in secrets.items():
+        if path.resolve().is_relative_to(data_dir):
+            raise ConfigError(
+                f"The {label} file {path} is inside the output directory {out_dir}. Keep tokens and "
+                "client secrets out of the folder you share with agents; choose another output directory."
+            )
+
+
+def _history_record(payload: dict) -> dict:
+    """Keep sync history compact: dates of latest records, not the records themselves."""
+    summary = payload["summary"]
+    compact = {key: value for key, value in summary.items() if key not in ("latest_activity", "latest_sleep")}
+    for name in ("activity", "sleep"):
+        latest = summary[f"latest_{name}"]
+        compact[f"latest_{name}_date"] = latest.get("date") if latest else None
+    record = {key: payload[key] for key in ("schema_version", "status", "synced_at")}
+    record["summary"] = compact
+    return record
+
+
 def _run_sync(args: argparse.Namespace) -> int:
     days = _configured_days(args.days)
     token_file = sync.default_token_file()
+    creds_file = sync.default_creds_file()
     out_dir = args.out.expanduser() if args.out else sync.default_out_dir()
     history_file = args.history.expanduser() if args.history else out_dir / HISTORY_NAME
     latest_file = out_dir / SNAPSHOT_NAME
     validate_paths(
         {
             "token": token_file,
-            "credentials": sync.default_creds_file(),
+            "credentials": creds_file,
             "snapshot": latest_file,
             "history": history_file,
         },
         locked=("token", "snapshot", "history"),
     )
+    _reject_secrets_in_output(out_dir, {"token": token_file, "credentials": creds_file})
     if not token_file.exists():
         raise ConfigError(f"Missing token file: {token_file}. Run withings-agent-sync authorize first.")
 
@@ -116,17 +143,17 @@ def _run_sync(args: argparse.Namespace) -> int:
             "summary": sync.summarize(measures, activity, sleep),
         }
         sync.save_json_secure(latest_file, payload)
-        append_jsonl_secure(
-            history_file,
-            {key: payload[key] for key in ("schema_version", "status", "synced_at", "summary")},
-        )
+        append_jsonl_secure(history_file, _history_record(payload))
 
     summary = payload["summary"]
     for name, entries in (("activity", activity), ("sleep", sleep)):
         for entry in entries:
             status = entry.get("error")
             if isinstance(status, int) and not isinstance(status, bool):
-                print(f"Warning: {name} is incomplete (Withings status {status}).", file=sys.stderr)
+                print(
+                    f"Warning: {name} is incomplete (Withings status {status}{sync.reauthorize_hint(status)}).",
+                    file=sys.stderr,
+                )
     if not args.quiet:
         print(
             f"Withings sync {payload['status']}: measures={summary['measure_count']} "
@@ -137,7 +164,7 @@ def _run_sync(args: argparse.Namespace) -> int:
             if item:
                 print(f"{key}: {item['value']} at {item['date']}")
         print(f"Wrote {latest_file}")
-    return 0
+    return EXIT_PARTIAL if partial else 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:

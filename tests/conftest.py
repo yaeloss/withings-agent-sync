@@ -23,7 +23,7 @@ def isolate(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(sync, "DEFAULT_TOKEN_FILE", tmp_path / "state" / "tokens.json")
     monkeypatch.setattr(sync, "DEFAULT_CREDS_FILE", tmp_path / "config" / "client.json")
-    monkeypatch.setattr(sync, "DEFAULT_OUT_DIR", tmp_path / "state")
+    monkeypatch.setattr(sync, "DEFAULT_OUT_DIR", tmp_path / "data")
 
     def no_network(*args: object, **kwargs: object) -> None:
         raise AssertionError("tests must not touch the network")

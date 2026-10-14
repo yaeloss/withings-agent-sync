@@ -3,10 +3,13 @@ from __future__ import annotations
 import io
 import json
 import socket
+import ssl
 import threading
 import time
+from datetime import date
 from http.client import BadStatusLine, IncompleteRead, RemoteDisconnected
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.error import URLError
 from urllib.request import ProxyHandler, build_opener
 
 import pytest
@@ -30,6 +33,70 @@ def test_http_protocol_failures_are_safe_api_errors(monkeypatch, error) -> None:
         sync.post_form("/measure", {})
     assert "DUMMY_PRIVATE_STATUS_LINE" not in str(result.value)
     assert "dummy-partial-body" not in str(result.value)
+
+
+@pytest.mark.parametrize(
+    ("error", "kind"),
+    [
+        (lambda marker: URLError(ssl.SSLCertVerificationError(marker)), "SSLCertVerificationError"),
+        (lambda marker: URLError(socket.gaierror(marker)), "gaierror"),
+        (lambda marker: TimeoutError(marker), "TimeoutError"),
+        (lambda marker: URLError(marker), "URLError"),
+    ],
+)
+def test_network_errors_name_the_failure_without_its_message(monkeypatch, error, kind) -> None:
+    marker = "DUMMY_PRIVATE_NETWORK_REASON"
+
+    def fail(*args, **kwargs):
+        raise error(marker)
+
+    monkeypatch.setattr(sync, "urlopen", fail)
+    with pytest.raises(sync.APIError, match="failed or timed out") as result:
+        sync.post_form("/measure", {})
+    assert f"({kind})" in str(result.value)
+    assert marker not in str(result.value)
+
+
+@pytest.mark.parametrize("status", sorted(sync.AUTH_FAILURE_STATUSES))
+def test_authentication_failures_tell_the_user_to_reauthorize(monkeypatch, status) -> None:
+    monkeypatch.setattr(sync, "post_form", lambda *a, **k: {"status": status, "body": {}})
+    with pytest.raises(sync.APIError, match="authorize again"):
+        sync.fetch_measures("dummy-access", 30)
+
+
+def test_failed_token_refresh_tells_the_user_to_reauthorize(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("WITHINGS_CLIENT_ID", "dummy-client")
+    monkeypatch.setenv("WITHINGS_CLIENT_SECRET", "dummy-secret")
+    monkeypatch.setattr(sync, "post_form", lambda *a, **k: {"status": 401, "body": {}})
+    with pytest.raises(sync.APIError, match="Token refresh failed with status 401.*authorize again"):
+        sync.refresh_if_needed({"refresh_token": "dummy-refresh"}, token_file=tmp_path / "tokens.json")
+
+
+def test_other_api_failures_do_not_suggest_reauthorizing(monkeypatch) -> None:
+    monkeypatch.setattr(sync, "post_form", lambda *a, **k: {"status": 503, "body": {}})
+    with pytest.raises(sync.APIError) as result:
+        sync.fetch_measures("dummy-access", 30)
+    assert "authorize" not in str(result.value)
+
+
+@pytest.mark.parametrize("fetcher", [sync.fetch_activity, sync.fetch_sleep])
+def test_daily_window_includes_today_for_users_ahead_of_utc(monkeypatch, fetcher) -> None:
+    calls = []
+
+    def capture(path, data, token=None):
+        calls.append(data)
+        return {"status": 0, "body": {}}
+
+    monkeypatch.setattr(sync, "_utc_today", lambda: date(2026, 10, 14))
+    monkeypatch.setattr(sync, "post_form", capture)
+    fetcher("dummy-access", 30)
+    assert (calls[0]["startdateymd"], calls[0]["enddateymd"]) == ("2026-09-14", "2026-10-15")
+
+
+def test_deprecated_sleep_fields_are_not_requested() -> None:
+    fields = set(sync.SLEEP_FIELDS.split(","))
+    assert not fields & {"durationtosleep", "durationtowakeup"}
+    assert {"sleep_latency", "wakeup_latency", "total_sleep_time", "sleep_score"} <= fields
 
 
 @pytest.mark.parametrize("path", ["measure", "//other-host.invalid/measure", "/measure?query=private", "/measure#fragment"])
@@ -83,7 +150,7 @@ def test_partial_sync_is_explicit_without_printing_provider_details(monkeypatch,
     monkeypatch.setattr(sync, "fetch_activity", lambda *a: [{"date": "2026-10-14", "steps": 123}])
     monkeypatch.setattr(sync, "fetch_sleep", lambda *a: [{"error": 123, "body": {"details": "DUMMY_PRIVATE_DETAILS"}}])
 
-    assert cli.main(["sync", "--quiet"]) == 0
+    assert cli.main(["sync", "--quiet"]) == cli.EXIT_PARTIAL
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == "Warning: sleep is incomplete (Withings status 123).\n"

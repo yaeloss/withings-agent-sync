@@ -13,5 +13,5 @@ client.json
 tokens.json
 withings_latest.json
 withings_sync_history.jsonl
-*.lock
+.*.lock
 .*.tmp

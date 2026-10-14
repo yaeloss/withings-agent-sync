@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
+import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -102,7 +105,7 @@ def test_partial_sync_is_explicit_even_when_quiet(monkeypatch, tmp_path, capsys)
     _, out_dir = setup_token(monkeypatch, tmp_path)
     stub_fetches(monkeypatch)
     monkeypatch.setattr(sync, "fetch_activity", lambda *a: [{"error": 123, "body": {}}])
-    assert cli.main(["sync", "--quiet"]) == 0
+    assert cli.main(["sync", "--quiet"]) == cli.EXIT_PARTIAL
     output = capsys.readouterr()
     assert output.out == ""
     assert "activity" in output.err and "123" in output.err
@@ -114,6 +117,66 @@ def test_partial_sync_is_explicit_even_when_quiet(monkeypatch, tmp_path, capsys)
     history = json.loads((out_dir / "withings_sync_history.jsonl").read_text())
     assert history["status"] == "partial"
     assert history["schema_version"] == 1
+
+
+def test_history_stores_dates_not_full_activity_or_sleep_records(monkeypatch, tmp_path):
+    _, out_dir = setup_token(monkeypatch, tmp_path)
+    stub_fetches(monkeypatch)
+    monkeypatch.setattr(sync, "fetch_activity", lambda *a: [{"date": "2026-10-14", "steps": 4321}])
+    monkeypatch.setattr(sync, "fetch_sleep", lambda *a: [{"date": "2026-10-13", "sleep_score": 81}])
+    assert cli.main(["sync", "--quiet"]) == 0
+    snapshot = storage.load_json(out_dir / "withings_latest.json")
+    assert snapshot["summary"]["latest_sleep"] == {"date": "2026-10-13", "sleep_score": 81}
+    history = json.loads((out_dir / "withings_sync_history.jsonl").read_text())
+    assert history["summary"] == {
+        "activity_count": 1,
+        "latest_activity_date": "2026-10-14",
+        "latest_measures": {},
+        "latest_sleep_date": "2026-10-13",
+        "measure_count": 0,
+        "sleep_count": 1,
+    }
+
+
+def test_authentication_failure_warning_tells_user_to_reauthorize(monkeypatch, tmp_path, capsys):
+    setup_token(monkeypatch, tmp_path)
+    stub_fetches(monkeypatch)
+    monkeypatch.setattr(sync, "fetch_sleep", lambda *a: [{"error": 401, "body": {}}])
+    assert cli.main(["sync", "--quiet"]) == cli.EXIT_PARTIAL
+    assert "authorize again" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("use_flag", [False, True])
+def test_output_directory_cannot_contain_tokens(monkeypatch, tmp_path, capsys, use_flag):
+    setup_token(monkeypatch, tmp_path)
+    stub_fetches(monkeypatch)
+    args = ["sync", "--quiet"]
+    if use_flag:
+        args += ["--out", str(tmp_path)]
+    else:
+        monkeypatch.setenv("WITHINGS_OUT_DIR", str(tmp_path))
+    assert cli.main(args) == 2
+    assert "share with agents" in capsys.readouterr().err
+    assert not (tmp_path / "withings_latest.json").exists()
+
+
+def test_output_directory_cannot_contain_client_credentials(monkeypatch, tmp_path, capsys):
+    _, out_dir = setup_token(monkeypatch, tmp_path)
+    stub_fetches(monkeypatch)
+    monkeypatch.setenv("WITHINGS_CREDS_FILE", str(out_dir / "nested" / "client.json"))
+    assert cli.main(["sync", "--quiet"]) == 2
+    assert "credentials file" in capsys.readouterr().err
+
+
+def test_default_data_directory_contains_no_secrets(tmp_path):
+    script = (
+        "from withings_agent_sync import sync; "
+        "print(sync.DEFAULT_TOKEN_FILE.is_relative_to(sync.DEFAULT_OUT_DIR), "
+        "sync.DEFAULT_CREDS_FILE.is_relative_to(sync.DEFAULT_OUT_DIR), sync.DEFAULT_OUT_DIR)"
+    )
+    environment = dict(os.environ, HOME=str(tmp_path), PYTHONPATH=str(Path(__file__).resolve().parents[1]))
+    result = subprocess.run([sys.executable, "-c", script], env=environment, capture_output=True, text=True, check=True)
+    assert result.stdout.strip() == f"False False {tmp_path / '.local/share/withings-agent-sync'}"
 
 
 @pytest.mark.parametrize("value", ["invalid", "0", "-1", "999999999999"])
