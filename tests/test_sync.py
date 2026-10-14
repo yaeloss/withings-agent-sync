@@ -111,3 +111,46 @@ def test_summarize_handles_empty_inputs() -> None:
     assert result["latest_measures"] == {}
     assert result["latest_activity"] is None
     assert result["latest_sleep"] is None
+
+
+def test_unexpired_token_is_not_refreshed(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    tokens = {"access_token": "still-valid", "refresh_token": "refresh", "expires_at": int(time.time()) + 7200}
+    monkeypatch.setattr(sync, "post_form", lambda *a, **k: pytest.fail("refresh should not call HTTP"))
+
+    assert sync.refresh_if_needed(tokens, token_file=tmp_path / "tokens.json") is tokens
+
+
+def test_expired_token_refreshes_and_saves_securely(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    token_file = tmp_path / "tokens.json"
+    tokens = {"access_token": "expired", "refresh_token": "refresh", "expires_at": 1}
+    calls = []
+
+    monkeypatch.setenv("WITHINGS_CLIENT_ID", "client-id")
+    monkeypatch.setenv("WITHINGS_CLIENT_SECRET", "client-secret")
+
+    def fake_post_form(path, data, token=None):
+        calls.append((path, data, token))
+        return {"status": 0, "body": {"access_token": "new-access", "refresh_token": "new-refresh", "expires_in": 10800}}
+
+    monkeypatch.setattr(sync, "post_form", fake_post_form)
+    result = sync.refresh_if_needed(tokens, token_file=token_file)
+
+    assert calls[0][0] == "/v2/oauth2"
+    assert calls[0][1]["grant_type"] == "refresh_token"
+    assert result["access_token"] == "new-access"
+    saved = sync.load_json(token_file)
+    assert saved["expires_at"] > int(time.time())
+    assert token_file.stat().st_mode & 0o777 == 0o600
+
+
+def test_expired_token_without_credentials_mentions_creds_path(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    creds_file = tmp_path / "client.json"
+    monkeypatch.delenv("WITHINGS_CLIENT_ID", raising=False)
+    monkeypatch.delenv("WITHINGS_CLIENT_SECRET", raising=False)
+
+    with pytest.raises(RuntimeError, match=str(creds_file)):
+        sync.refresh_if_needed(
+            {"access_token": "expired", "refresh_token": "refresh", "expires_at": 1},
+            token_file=tmp_path / "tokens.json",
+            creds_file=creds_file,
+        )
