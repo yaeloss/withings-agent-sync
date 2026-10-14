@@ -1,0 +1,175 @@
+from __future__ import annotations
+
+import stat
+import time
+from urllib.parse import parse_qs, urlsplit
+
+import pytest
+
+from withings_sync import auth, sync
+
+REDIRECT_URI = "http://127.0.0.1:8383/callback"
+
+
+def test_default_scope_uses_documented_withings_scopes() -> None:
+    assert auth.DEFAULT_SCOPE == "user.info,user.metrics,user.activity,user.sleep"
+
+
+def test_build_authorize_url() -> None:
+    url = auth.build_authorize_url("client id", REDIRECT_URI, auth.DEFAULT_SCOPE, "state-value")
+    parts = urlsplit(url)
+
+    assert f"{parts.scheme}://{parts.netloc}{parts.path}" == "https://account.withings.com/oauth2_user/authorize2"
+    assert parse_qs(parts.query) == {
+        "response_type": ["code"],
+        "client_id": ["client id"],
+        "redirect_uri": [REDIRECT_URI],
+        "scope": [auth.DEFAULT_SCOPE],
+        "state": ["state-value"],
+    }
+
+
+def test_exchange_code_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+
+    def fake_post_form(path, data, token=None):
+        calls.append((path, data, token))
+        return {
+            "status": 0,
+            "body": {"access_token": "access", "refresh_token": "refresh", "expires_in": 10800, "userid": 42},
+        }
+
+    monkeypatch.setattr(sync, "post_form", fake_post_form)
+    monkeypatch.setattr(auth.time, "time", lambda: 1_000_000)
+
+    result = auth.exchange_code("client", "secret", "code", REDIRECT_URI)
+
+    assert calls == [
+        (
+            "/v2/oauth2",
+            {
+                "action": "requesttoken",
+                "grant_type": "authorization_code",
+                "code": "code",
+                "client_id": "client",
+                "client_secret": "secret",
+                "redirect_uri": REDIRECT_URI,
+            },
+            None,
+        )
+    ]
+    assert result["access_token"] == "access"
+    assert result["saved_at"] == 1_000_000
+    assert result["expires_at"] == 1_000_000 + 10800
+
+
+def test_exchange_code_raises_on_api_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sync, "post_form", lambda *a, **k: {"status": 503, "body": {"error": "invalid code"}})
+
+    with pytest.raises(RuntimeError, match="status=503"):
+        auth.exchange_code("client", "secret", "code", REDIRECT_URI)
+
+
+def test_parse_callback_returns_code_for_matching_state() -> None:
+    assert auth.parse_callback("/callback?code=abc&state=expected", "expected") == "abc"
+
+
+def test_parse_callback_rejects_state_mismatch() -> None:
+    with pytest.raises(RuntimeError, match="state"):
+        auth.parse_callback("/callback?code=abc&state=forged", "expected")
+
+
+def test_parse_callback_rejects_missing_state() -> None:
+    with pytest.raises(RuntimeError, match="state"):
+        auth.parse_callback("/callback?code=abc", "expected")
+
+
+def test_parse_callback_reports_provider_error() -> None:
+    with pytest.raises(RuntimeError, match="access_denied"):
+        auth.parse_callback("/callback?error=access_denied&state=expected", "expected")
+
+
+def test_parse_callback_requires_code() -> None:
+    with pytest.raises(RuntimeError, match="code"):
+        auth.parse_callback("/callback?state=expected", "expected")
+
+
+class FakeServer:
+    instances: list["FakeServer"] = []
+
+    def __init__(self, port, expected_state):
+        self.port = port
+        self.expected_state = expected_state
+        self.closed = False
+        FakeServer.instances.append(self)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.closed = True
+
+    def wait_for_code(self, timeout):
+        self.timeout = timeout
+        return "auth-code"
+
+
+def test_run_authorize_writes_token_file_with_expected_fields(monkeypatch: pytest.MonkeyPatch, tmp_path, capsys) -> None:
+    creds_file = tmp_path / "client.json"
+    creds_file.write_text('{"client_id": "client", "client_secret": "secret"}')
+    token_file = tmp_path / "state" / "tokens.json"
+    opened = []
+    calls = []
+
+    def fake_post_form(path, data, token=None):
+        calls.append((path, data))
+        return {
+            "status": 0,
+            "body": {
+                "access_token": "access",
+                "refresh_token": "refresh",
+                "expires_in": 10800,
+                "userid": 42,
+                "scope": "user.info,user.metrics,user.activity",
+                "token_type": "Bearer",
+            },
+        }
+
+    FakeServer.instances.clear()
+    monkeypatch.setattr(auth, "CallbackServer", FakeServer)
+    monkeypatch.setattr(auth.webbrowser, "open", lambda url: opened.append(url) or True)
+    monkeypatch.setattr(sync, "post_form", fake_post_form)
+
+    auth.run_authorize(creds_file=creds_file, token_file=token_file, port=8383)
+
+    server = FakeServer.instances[0]
+    assert server.port == 8383
+    assert server.closed
+    assert parse_qs(urlsplit(opened[0]).query)["state"] == [server.expected_state]
+    assert calls[0][1]["code"] == "auth-code"
+    assert calls[0][1]["redirect_uri"] == REDIRECT_URI
+    saved = sync.load_json(token_file)
+    assert set(saved) == {"access_token", "refresh_token", "expires_at", "userid", "saved_at"}
+    assert stat.S_IMODE(token_file.stat().st_mode) == 0o600
+    out = capsys.readouterr().out
+    assert REDIRECT_URI in out
+    assert str(token_file) in out
+
+
+def test_run_authorize_without_credentials_is_config_error(tmp_path) -> None:
+    with pytest.raises(auth.ConfigError, match="client.json"):
+        auth.run_authorize(creds_file=tmp_path / "client.json", token_file=tmp_path / "tokens.json")
+
+
+def test_run_authorize_reports_busy_port(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    creds_file = tmp_path / "client.json"
+    creds_file.write_text('{"client_id": "client", "client_secret": "secret"}')
+
+    def busy(port, expected_state):
+        raise OSError("Address already in use")
+
+    monkeypatch.setattr(auth, "CallbackServer", busy)
+
+    with pytest.raises(RuntimeError, match="--port"):
+        auth.run_authorize(creds_file=creds_file, token_file=tmp_path / "tokens.json")
+    assert not (tmp_path / "tokens.json").exists()
