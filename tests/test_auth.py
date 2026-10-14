@@ -82,6 +82,30 @@ def test_parse_callback_reports_provider_error_and_missing_code() -> None:
         auth.parse_callback("/callback?state=expected", "expected")
 
 
+def test_parse_pasted_callback_requires_registered_https_address() -> None:
+    redirect_uri = "https://tower.example/withings/callback"
+    assert (
+        auth.parse_pasted_callback(
+            "https://tower.example/withings/callback?code=abc&state=expected#ignored",
+            redirect_uri,
+            "expected",
+        )
+        == "abc"
+    )
+    with pytest.raises(auth.CallbackRejected, match="registered callback"):
+        auth.parse_pasted_callback("https://other.example/withings/callback?code=abc&state=expected", redirect_uri, "expected")
+    with pytest.raises(auth.CallbackRejected, match="state"):
+        auth.parse_pasted_callback("https://tower.example/withings/callback?code=abc&state=wrong", redirect_uri, "expected")
+    with pytest.raises(auth.CallbackRejected, match="too long"):
+        auth.parse_pasted_callback("https://tower.example/withings/callback?code=" + "x" * auth.MAX_PASTE_LENGTH, redirect_uri, "expected")
+
+
+@pytest.mark.parametrize("value", ["http://tower.example/callback", "https://tower.example/callback?x=1", "https://tower.example/callback#x"])
+def test_validate_redirect_uri_requires_exact_https_url(value: str) -> None:
+    with pytest.raises(auth.ConfigError, match="exact https"):
+        auth.validate_redirect_uri(value)
+
+
 class FakeServer:
     instances: list["FakeServer"] = []
 
@@ -138,6 +162,41 @@ def test_run_authorize_writes_only_expected_private_fields(monkeypatch: pytest.M
     assert set(saved) == {"access_token", "refresh_token", "expires_at", "userid", "saved_at"}
     assert stat.S_IMODE(token_file.stat().st_mode) == 0o600
     assert REDIRECT_URI in out
+
+
+def test_run_authorize_external_callback_uses_pasted_url(monkeypatch: pytest.MonkeyPatch, tmp_path, capsys) -> None:
+    creds_file = tmp_path / "client.json"
+    storage.save_json_secure(creds_file, {"client_id": "client", "client_secret": "secret"})
+    token_file = tmp_path / "state" / "tokens.json"
+    redirect_uri = "https://tower.example/withings/callback"
+    calls = []
+
+    def fake_post_form(path, data, token=None):
+        calls.append((path, data, token))
+        return {
+            "status": 0,
+            "body": {"access_token": "access", "refresh_token": "refresh", "expires_in": 10800, "userid": 42},
+        }
+
+    monkeypatch.setattr(auth, "post_form", fake_post_form)
+    original_url = auth.build_authorize_url
+    state_holder = []
+
+    def capture_url(client_id, callback, scope, state):
+        state_holder.append(state)
+        return original_url(client_id, callback, scope, state)
+
+    monkeypatch.setattr(auth, "build_authorize_url", capture_url)
+    monkeypatch.setattr(auth.getpass, "getpass", lambda prompt: f"{redirect_uri}?code=auth-code&state={state_holder[0]}")
+    auth.run_authorize(
+        creds_file=creds_file,
+        token_file=token_file,
+        redirect_uri=redirect_uri,
+        open_browser=False,
+    )
+    assert calls[0][1]["redirect_uri"] == redirect_uri
+    assert sync.load_json(token_file)["access_token"] == "access"
+    assert "Waiting up to five minutes" not in capsys.readouterr().out
 
 
 def test_run_authorize_without_credentials_is_config_error(tmp_path) -> None:

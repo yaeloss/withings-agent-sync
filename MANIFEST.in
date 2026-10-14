@@ -1,2 +1,4 @@
 include README.md LICENSE SECURITY.md
 recursive-include tests *.py
+recursive-include deploy *.service *.timer
+recursive-include integrations *.md

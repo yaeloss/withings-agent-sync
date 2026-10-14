@@ -55,6 +55,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
     authorize = subparsers.add_parser("authorize", help="authorize this app with Withings")
     authorize.add_argument("--port", type=_port, default=8383, help="localhost callback port (default: 8383)")
+    authorize.add_argument(
+        "--redirect-uri",
+        help="HTTPS callback URL hosted elsewhere; paste the browser callback URL instead of using localhost",
+    )
     authorize.add_argument("--no-browser", action="store_true", help="print the URL without opening a browser")
 
     sync_parser = subparsers.add_parser("sync", help="fetch and save recent Withings data")
@@ -172,7 +176,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         if args.command == "authorize":
-            auth.run_authorize(port=args.port, open_browser=not args.no_browser)
+            authorize_args = {"port": args.port, "open_browser": not args.no_browser}
+            if args.redirect_uri:
+                authorize_args["redirect_uri"] = args.redirect_uri
+            auth.run_authorize(**authorize_args)
             return 0
         if args.command == "sync":
             return _run_sync(args)

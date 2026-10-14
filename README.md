@@ -100,6 +100,152 @@ Authorization waits up to five minutes, rejects mismatched state and malformed
 callbacks, and saves tokens only after a successful code exchange. The browser
 response is an acknowledgement; the terminal confirms whether tokens were saved.
 
+### Hosted callback (paste mode)
+
+If the callback registered in your Withings application is an HTTPS URL on
+another server, use paste mode:
+
+```bash
+withings-agent-sync authorize \
+  --redirect-uri https://callback.example/withings/callback \
+  --no-browser
+```
+
+Open the printed URL, approve access, and Withings sends your browser to the
+callback URL with `code` and `state` in its address. The callback page does not
+need to work; only its address matters. Copy the full address from the browser
+and paste it into the hidden prompt within about 30 seconds, before the code
+expires. The command checks that the address and `state` match, then exchanges
+the code itself. Credentials are never sent to the callback server.
+
+The `--redirect-uri` value must exactly match the URL registered in the
+Withings Developer Dashboard. The callback server receives the one-time code in
+its access logs; the code expires quickly and is useless without your client
+secret. Pages that rewrite or strip the address bar's query string break paste
+mode.
+
+## Run on a server (for example, a Hermes Agent host)
+
+Install the CLI on the server and keep its credentials, tokens, and health data
+there. These steps use a virtual environment so the server needs only Python
+3.10+ with `venv`:
+
+```bash
+python3 -m venv ~/.local/venvs/withings-agent-sync
+~/.local/venvs/withings-agent-sync/bin/python -m pip install \
+  'git+https://github.com/yaeloss/withings-agent-sync.git'
+```
+
+Create `~/.config/withings-agent-sync/client.json` on the server as described
+in [Setup](#setup), then authorize from an SSH session with paste mode (or an
+SSH tunnel):
+
+```bash
+~/.local/venvs/withings-agent-sync/bin/withings-agent-sync authorize \
+  --redirect-uri https://callback.example/withings/callback --no-browser
+```
+
+Withings rotates the refresh token whenever the access token is refreshed, so
+tokens should live on one machine only. Do not put the client secret or tokens
+in an agent's prompt, memory, skill files, or chat.
+
+### Scheduled sync with systemd
+
+Run syncs from the server's service manager, not from an agent conversation.
+Templates are in [`deploy/systemd/`](deploy/systemd/); they assume the virtual
+environment path above.
+
+```bash
+mkdir -p ~/.config/systemd/user
+for unit in withings-agent-sync.service withings-agent-sync.timer; do
+  curl -fsSLo ~/.config/systemd/user/$unit \
+    https://raw.githubusercontent.com/yaeloss/withings-agent-sync/main/deploy/systemd/$unit
+done
+systemctl --user daemon-reload
+systemctl --user enable --now withings-agent-sync.timer
+sudo loginctl enable-linger "$USER"   # keep user timers running after logout
+```
+
+The timer runs every five hours and catches up after downtime. Check it with
+`systemctl --user list-timers withings-agent-sync.timer` and
+`journalctl --user -u withings-agent-sync.service`. A partial sync (exit code
+`3`) marks the service failed so it is visible; the next run still happens.
+
+## Add to Hermes Agent
+
+These steps make your Withings data available to a
+[Hermes Agent](https://hermes-agent.nousresearch.com/). Run them on the machine
+where Hermes runs, as the same Linux user Hermes runs as. Hermes reads the
+synced data; it never signs in to Withings or runs the sync itself.
+
+1. **Install and authorize the CLI** on the Hermes host, as described in
+   [Run on a server](#run-on-a-server-for-example-a-hermes-agent-host).
+2. **Turn on scheduled syncs** with the
+   [systemd timer](#scheduled-sync-with-systemd), then run one sync and confirm
+   the snapshot exists:
+
+   ```bash
+   systemctl --user start withings-agent-sync.service
+   ls -l ~/.local/share/withings-agent-sync/withings_latest.json
+   ```
+
+3. **Install the Hermes skill.**
+   [`integrations/hermes/withings-health/SKILL.md`](integrations/hermes/withings-health/SKILL.md)
+   tells Hermes where the snapshot is and how to read it. It also tells Hermes
+   to report how fresh the data is and to stay out of the token and credential
+   folders.
+
+   ```bash
+   hermes skills install \
+     https://raw.githubusercontent.com/yaeloss/withings-agent-sync/main/integrations/hermes/withings-health/SKILL.md
+   hermes skills list | grep withings-health
+   ```
+
+   Hermes shows the skill's security scan before installing. Open
+   conversations pick up the new skill with your next message.
+
+4. **Ask Hermes about your data**, either naturally or with the skill's slash
+   command:
+
+   ```text
+   /withings-health How has my weight changed over the last two weeks?
+   ```
+
+   Hermes should answer from the snapshot and mention its `synced_at` time.
+
+5. **Optional: get a daily summary** with a Hermes cron job. Cron jobs start a
+   fresh session, so attach the skill and keep the prompt self-contained:
+
+   ```bash
+   hermes cron create "0 8 * * *" \
+     "Summarize my latest Withings weight, activity, and sleep in three bullets. Mention when the data was synced and flag a partial or stale sync." \
+     --skill withings-health
+   ```
+
+   Add `--deliver` to send the summary to a messaging platform; see the
+   [Hermes cron docs](https://hermes-agent.nousresearch.com/docs/user-guide/features/cron).
+
+### Keep your Withings access private
+
+- Never paste the client secret, tokens, or raw health files into a Hermes
+  chat. Hermes' memory and session history may keep them.
+- Do not ask Hermes to run `withings-agent-sync authorize`. Re-authorize
+  yourself over SSH when the token expires or is revoked.
+- The data files are owner-only (`0600`), so Hermes must run as the same Linux
+  user as the timer to read them. That also means file permissions cannot stop
+  Hermes from reading the tokens; the skill's instructions are guidance, not a
+  security boundary. For real isolation, run Hermes' terminal backend in a
+  container that mounts only `~/.local/share/withings-agent-sync/` read-only.
+
+### Update
+
+```bash
+~/.local/venvs/withings-agent-sync/bin/python -m pip install --upgrade \
+  'git+https://github.com/yaeloss/withings-agent-sync.git'
+hermes skills install \
+  https://raw.githubusercontent.com/yaeloss/withings-agent-sync/main/integrations/hermes/withings-health/SKILL.md
+```
+
 ## Important Withings details
 
 > **Gotchas**

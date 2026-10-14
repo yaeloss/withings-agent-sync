@@ -1,0 +1,11 @@
+[Unit]
+Description=Run withings-agent-sync every five hours
+Documentation=https://github.com/yaeloss/withings-agent-sync
+
+[Timer]
+OnCalendar=*-*-* 00/5:17:00
+RandomizedDelaySec=10min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

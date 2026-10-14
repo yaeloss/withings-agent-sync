@@ -236,3 +236,10 @@ def test_no_browser_option_is_forwarded(monkeypatch):
     monkeypatch.setattr(cli.auth, "run_authorize", lambda **kwargs: calls.append(kwargs))
     assert cli.main(["authorize", "--no-browser", "--port", "8384"]) == 0
     assert calls == [{"port": 8384, "open_browser": False}]
+
+
+def test_redirect_uri_option_is_forwarded(monkeypatch):
+    calls = []
+    monkeypatch.setattr(cli.auth, "run_authorize", lambda **kwargs: calls.append(kwargs))
+    assert cli.main(["authorize", "--redirect-uri", "https://tower.example/callback", "--no-browser"]) == 0
+    assert calls == [{"port": 8383, "open_browser": False, "redirect_uri": "https://tower.example/callback"}]

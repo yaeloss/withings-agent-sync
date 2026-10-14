@@ -1,0 +1,8 @@
+[Unit]
+Description=Sync Withings data to local JSON
+Documentation=https://github.com/yaeloss/withings-agent-sync
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/venvs/withings-agent-sync/bin/withings-agent-sync sync --quiet
+UMask=0077

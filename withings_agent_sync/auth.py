@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import getpass
 import secrets
 import socket
 import sys
@@ -23,6 +24,11 @@ CALLBACK_PATH = "/callback"
 # user.activity covers sleep summaries; user.sleep is not a Public API scope.
 DEFAULT_SCOPE = "user.info,user.metrics,user.activity"
 CALLBACK_TIMEOUT = 300
+MAX_PASTE_LENGTH = 8192
+REDIRECT_URI_HELP = (
+    "--redirect-uri must be the exact https:// callback URL registered in your Withings application, "
+    "without a query string or fragment."
+)
 
 
 class CallbackError(APIError):
@@ -71,9 +77,61 @@ def exchange_code(client_id: str, client_secret: str, code: str, redirect_uri: s
 def parse_callback(path: str, expected_state: str) -> str:
     try:
         parsed = urlsplit(path)
-        if parsed.path != CALLBACK_PATH or parsed.scheme or parsed.netloc or parsed.fragment:
-            raise CallbackRejected("OAuth callback used an unexpected path")
-        query = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=10)
+    except ValueError as exc:
+        raise CallbackRejected("Malformed OAuth callback") from exc
+    if parsed.path != CALLBACK_PATH or parsed.scheme or parsed.netloc or parsed.fragment:
+        raise CallbackRejected("OAuth callback used an unexpected path")
+    return _code_from_query(parsed.query, expected_state)
+
+
+def validate_redirect_uri(value: str) -> str:
+    if not isinstance(value, str) or len(value) > 2048 or any(ord(char) <= 32 or ord(char) == 127 for char in value):
+        raise ConfigError(REDIRECT_URI_HELP)
+    try:
+        parts = urlsplit(value)
+        parts.port  # Raises ValueError for an invalid port.
+    except ValueError as exc:
+        raise ConfigError(REDIRECT_URI_HELP) from exc
+    if (
+        parts.scheme != "https"
+        or not parts.hostname
+        or parts.username is not None
+        or parts.password is not None
+        or "?" in value
+        or "#" in value
+    ):
+        raise ConfigError(REDIRECT_URI_HELP)
+    return value
+
+
+def _same_callback_address(pasted: Any, expected: Any) -> bool:
+    return (
+        pasted.scheme == expected.scheme
+        and pasted.hostname == expected.hostname
+        and (pasted.port or 443) == (expected.port or 443)
+        and (pasted.path or "/") == (expected.path or "/")
+        and pasted.username is None
+        and pasted.password is None
+    )
+
+
+def parse_pasted_callback(text: str, redirect_uri: str, expected_state: str) -> str:
+    if not isinstance(text, str) or not text.strip() or len(text) > MAX_PASTE_LENGTH:
+        raise CallbackRejected("That callback URL is empty or too long")
+    # The fragment never reaches a server; pages may add one client-side, so ignore it.
+    try:
+        pasted = urlsplit(text.strip())
+        same_address = _same_callback_address(pasted, urlsplit(redirect_uri))
+    except ValueError as exc:
+        raise CallbackRejected("That is not a valid callback URL") from exc
+    if not same_address:
+        raise CallbackRejected("That URL is not the registered callback address")
+    return _code_from_query(pasted.query, expected_state)
+
+
+def _code_from_query(query_string: str, expected_state: str) -> str:
+    try:
+        query = parse_qs(query_string, keep_blank_values=True, max_num_fields=10)
     except ValueError as exc:
         raise CallbackRejected("Malformed OAuth callback") from exc
     states = query.get("state", [])
@@ -257,9 +315,12 @@ def run_authorize(
     token_file: Path | str | None = None,
     port: int = 8383,
     open_browser: bool = True,
+    redirect_uri: str | None = None,
 ) -> None:
     if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
         raise ConfigError("Callback port must be between 1 and 65535")
+    if redirect_uri is not None:
+        redirect_uri = validate_redirect_uri(redirect_uri)
     creds_path = Path(creds_file).expanduser() if creds_file is not None else sync.default_creds_file()
     token_path = Path(token_file).expanduser() if token_file is not None else sync.default_token_file()
     validate_paths({"credentials": creds_path, "token": token_path}, locked=("token",))
@@ -270,21 +331,32 @@ def run_authorize(
                 f"Missing Withings client credentials. Create {creds_path} with client_id/client_secret "
                 "or set WITHINGS_CLIENT_ID and WITHINGS_CLIENT_SECRET."
             )
-        redirect_uri = f"http://{REDIRECT_HOST}:{port}{CALLBACK_PATH}"
         state = secrets.token_urlsafe(16)
-        url = build_authorize_url(client_id, redirect_uri, DEFAULT_SCOPE, state)
-        try:
-            server = CallbackServer(port, state)
-        except OSError as exc:
-            raise ConfigError(
-                f"Could not listen on port {port}. Choose another with --port and register its callback URL."
-            ) from exc
-        with server:
+        if redirect_uri is not None:
+            url = build_authorize_url(client_id, redirect_uri, DEFAULT_SCOPE, state)
             print(f"Open this URL to authorize Withings: {url}", flush=True)
-            print(f"Waiting up to five minutes at {redirect_uri} ...", flush=True)
             if open_browser:
                 _launch_browser(url)
-            code = server.wait_for_code()
+            try:
+                pasted = getpass.getpass("Paste the full callback URL from the browser (input is hidden): ")
+            except (EOFError, OSError) as exc:
+                raise ConfigError("Could not read the callback URL. Re-run authorize and paste it manually.") from exc
+            code = parse_pasted_callback(pasted, redirect_uri, state)
+        else:
+            redirect_uri = f"http://{REDIRECT_HOST}:{port}{CALLBACK_PATH}"
+            url = build_authorize_url(client_id, redirect_uri, DEFAULT_SCOPE, state)
+            try:
+                server = CallbackServer(port, state)
+            except OSError as exc:
+                raise ConfigError(
+                    f"Could not listen on port {port}. Choose another with --port and register its callback URL."
+                ) from exc
+            with server:
+                print(f"Open this URL to authorize Withings: {url}", flush=True)
+                print(f"Waiting up to five minutes at {redirect_uri} ...", flush=True)
+                if open_browser:
+                    _launch_browser(url)
+                code = server.wait_for_code()
         tokens = exchange_code(client_id, client_secret, code, redirect_uri)
         sync.save_json_secure(token_path, tokens)
         print(f"Saved Withings tokens to {token_path}")
