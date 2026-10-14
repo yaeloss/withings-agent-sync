@@ -7,6 +7,12 @@ data is stored locally; API requests and OAuth credentials go only to Withings.
 
 Requires Python 3.10+ on Linux or macOS.
 
+> **Independent project:** withings-agent-sync is an independent, open-source
+> tool. It is not affiliated with, endorsed by, or supported by Withings. It
+> uses the official [Withings Public Health Data API](https://developer.withings.com/)
+> through a developer application that you create and authorize yourself.
+> Withings and related names are trademarks of their respective owner.
+
 > **Withings plan requirement:** Withings says the free “Start for Free” API
 > plan requires a Withings+ membership for Withings accounts created after
 > October 12, 2026. Check the [Withings API plans](https://developer.withings.com/developer-guide/v3/withings-solutions/withings-api-plans/)

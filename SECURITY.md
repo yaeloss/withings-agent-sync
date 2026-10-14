@@ -4,6 +4,11 @@ Tokens, client credentials, and exported health records are sensitive. Do not
 include them in issues, pull requests, screenshots, or public logs. Report only
 the command, application/Python version, OS, and sanitized error/status code.
 
+This is an independent open-source project, not an official Withings product.
+It uses Withings' official Public Health Data API; users must create and
+authorize their own developer application. It is not affiliated with,
+endorsed by, or supported by Withings.
+
 For vulnerabilities, use GitHub's **Security → Report a vulnerability** when
 private vulnerability reporting is enabled on
 [yaeloss/withings-agent-sync](https://github.com/yaeloss/withings-agent-sync).
