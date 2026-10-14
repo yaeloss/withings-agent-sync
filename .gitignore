@@ -3,3 +3,15 @@ __pycache__/
 dist/
 .pytest_cache/
 .venv/
+build/
+.coverage
+htmlcov/
+.env
+.env.*
+!.env.example
+client.json
+tokens.json
+withings_latest.json
+withings_sync_history.jsonl
+*.lock
+.*.tmp

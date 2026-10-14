@@ -3,9 +3,10 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "withings-sync"
+name = "withings-agent-sync"
 version = "0.1.0"
-description = "Zero-dependency Withings to local JSON sync (body composition, activity, sleep)."
+description = "Private, zero-dependency Withings JSON sync for agents and local pipelines."
+readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 license-files = ["LICENSE"]
@@ -13,16 +14,24 @@ authors = [{ name = "Yael Ossowski" }]
 dependencies = []
 classifiers = [
     "Programming Language :: Python :: 3",
-    "Operating System :: OS Independent",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS :: MacOS X",
     "Environment :: Console",
 ]
 
 [project.scripts]
-withings-sync = "withings_sync.__main__:main"
+withings-agent-sync = "withings_agent_sync.__main__:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "build>=1.2"]
+
+[project.urls]
+Repository = "https://github.com/yaeloss/withings-agent-sync"
+Issues = "https://github.com/yaeloss/withings-agent-sync/issues"
 
 [tool.setuptools]
-packages = ["withings_sync"]
+packages = ["withings_agent_sync"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["."]
+addopts = "-ra"
